@@ -148,8 +148,8 @@ if st.session_state.active_df is not None:
         tte = get_tte(str(trading_date), selected_expiry)
         final_df['intrinsic'] = np.where(
             final_df['TYPE'] == 'CE',
-            (final_df['SPOT'] - final_df['STRIKE'] * np.exp(-RISK_FREE_RATE * tte)), # Discounted Strike
-            (final_df['STRIKE'] * np.exp(-RISK_FREE_RATE * tte) - final_df['SPOT']))
+            (final_df['SPOT'] - final_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
+            (final_df['STRIKE'] * np.exp(-risk_free * tte) - final_df['SPOT']))
         final_df['intrinsic'] = final_df['intrinsic'].clip(lower=0)
         final_df = final_df[final_df['CLOSE'] > final_df['intrinsic']].copy()
         final_df = final_df[final_df['CLOSE'] > 1.0]
