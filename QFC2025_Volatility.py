@@ -160,16 +160,52 @@ if st.session_state.active_df is not None:
         final_df['IV_pct'] = final_df['IV'] * 100
         
     # 3. Visualization
-    st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
-    
-    fig = px.line(final_df, x="STRIKE", y="CLOSE", color="TYPE",
-                  labels={"STRIKE": "Strike Price", "CLOSE": "Closing Price"},
-                  markers=True, template="plotly_dark")
-    fig = px.line(final_df, x="STRIKE", y="IV_pct", color="TYPE",
-                  labels={"STRIKE": "Strike Price", "IV_Pct": "Implied Volatility (BS)"},
-                  markers=True, template="plotly_dark")
-    st.plotly_chart(fig, use_container_width=True)
+#    st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
+#    
+#    fig = px.line(final_df, x="STRIKE", y="CLOSE", color="TYPE",
+#                  labels={"STRIKE": "Strike Price", "CLOSE": "Closing Price"},
+#                  markers=True, template="plotly_dark")
+#    fig = px.line(final_df, x="STRIKE", y="IV_pct", color="TYPE",
+#                  labels={"STRIKE": "Strike Price", "IV_Pct": "Implied Volatility (BS)"},
+#                  markers=True, template="plotly_dark")
+#    st.plotly_chart(fig, use_container_width=True)
+# --- 3. SIDE-BY-SIDE VISUALIZATION ---
+st.subheader(f"📊 {symbol} Analysis - Expiry: {selected_expiry}")
 
+# Create two equal-width columns
+col1, col2 = st.columns(2)
+
+with col1:
+    # Plot 1: Close Prices
+    fig_price = px.line(
+        final_df, 
+        x="STRIKE", 
+        y="CLOSE", 
+        color="TYPE",
+        title="Option Closing Prices",
+        labels={"STRIKE": "Strike", "CLOSE": "Price (₹)"},
+        color_discrete_map={'CE': '#00ff00', 'PE': '#ff0000'},
+        markers=True, 
+        template="plotly_dark"
+    )
+    fig_price.update_layout(hovermode="x unified")
+    st.plotly_chart(fig_price, use_container_width=True)
+
+with col2:
+    # Plot 2: Implied Volatility (The Smile)
+    fig_iv = px.line(
+        final_df, 
+        x="STRIKE", 
+        y="IV_pct", 
+        color="TYPE",
+        title="Implied Volatility (Smile)",
+        labels={"STRIKE": "Strike", "IV_pct": "IV (%)"},
+        color_discrete_map={'CE': '#00ff00', 'PE': '#ff0000'},
+        markers=True, 
+        template="plotly_dark"
+    )
+    fig_iv.update_layout(hovermode="x unified")
+    st.plotly_chart(fig_iv, use_container_width=True)
     # 4. Data Table
     with st.expander("View Filtered Data Table"):
         st.dataframe(final_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']], use_container_width=True)
