@@ -217,7 +217,7 @@ if st.session_state.active_df is not None:
         fig_iv.update_layout(hovermode="x unified")
         st.plotly_chart(fig_iv, use_container_width=True)
         # 4. Data Table
-        with st.expander("View Filtered Data Table"):
-            st.dataframe(final_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']], use_container_width=True)
+    with st.expander("View Filtered Data Table"):
+                st.dataframe(final_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']].sort_values(by=['TYPE','STRIKE']), use_container_width=True)
 else:
     st.info("Please select a date and click 'Get Data' in the sidebar to begin.")
