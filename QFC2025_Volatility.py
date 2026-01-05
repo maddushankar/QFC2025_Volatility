@@ -8,6 +8,42 @@ import os
 st.set_page_config(page_title="Nifty Maturity Hub", layout="wide")
 CACHE_DIR = "data_cache"
 
+@st.cache_data(show_spinner="Downloading from NSE...")
+def get_nifty_data(target_date):
+    date_str = target_date.strftime("%Y%m%d")
+    # New UDiFF URL Pattern
+    url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{date_str}_F_0000.csv.zip"
+    local_filename = f"{CACHE_DIR}/fo_{date_str}.csv"
+
+    # Step 1: Check Disk Cache First
+    if os.path.exists(local_filename):
+        return pd.read_csv(local_filename)
+
+    # Step 2: Download if not in Cache
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.nseindia.com/"
+    }
+    
+    try:
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5) # Handshake
+        response = session.get(url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                csv_name = z.namelist()[0]
+                with z.open(csv_name) as f:
+                    df = pd.read_csv(f)
+                    # Standardize UDiFF columns for easier use
+                    df.columns = [c.strip() for c in df.columns]
+                    # Save to Disk Cache for future reboots
+                    df.to_csv(local_filename, index=False)
+                    return df
+        else:
+            return f"Error: Status {response.status_code} (Market likely closed)"
+    except Exception as e:
+        return f"Request failed: {str(e)}"
 # --- SIDEBAR: Controls ---
 with st.sidebar:
     st.header("📅 Data Controls")
@@ -26,7 +62,7 @@ def load_and_standardize(date_obj):
     
     if not os.path.exists(file_path):
         return None # In a real app, call your download function here
-        
+    data = get_nifty_data(date_obj)
     df = pd.read_csv(file_path)
     # Mapping UDiFF ISO Tags to readable names
     cols = {
