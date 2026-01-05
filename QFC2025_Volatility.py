@@ -9,6 +9,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from streamlit_autorefresh import st_autorefresh
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Team Finance Dashboard", layout="wide")
@@ -90,3 +91,8 @@ except Exception as e:
 # 4. Data Table
 with st.expander("View Raw Data Table"):
     st.dataframe(df)
+
+if st.button("Submit Changes"):
+    # Perform some logic here (e.g., save to a database)
+    st.success("Saved!")
+    st.rerun()  # Immediately starts the script from the top
