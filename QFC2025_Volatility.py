@@ -82,7 +82,7 @@ def get_nifty_data(target_date):
                     # Map new ISO Tags to readable names immediately
                     cols = {
                         'TckrSymb': 'SYMBOL', 'XpryDt': 'EXPIRY', 'StrkPric': 'STRIKE',
-                        'OptnTp': 'TYPE', 'ClsPric': 'CLOSE', 'OpnIntrst': 'OI'
+                        'OptnTp': 'TYPE', 'ClsPric': 'CLOSE', 'OpnIntrst': 'OI', 'UndrlygPric': 'SPOT'
                     }
                     df = df.rename(columns=cols)
                     df.to_csv(local_filename, index=False)
@@ -154,7 +154,7 @@ if st.session_state.active_df is not None:
         final_df = final_df[final_df['CLOSE'] > final_df['intrinsic']].copy()
         final_df = final_df[final_df['CLOSE'] > 1.0]
         final_df['IV'] = final_df.apply(
-            lambda row: find_iv(row['CLOSE'], row['UndrlygPric'], row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
+            lambda row: find_iv(row['CLOSE'], row['SPOT'], row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
         )
         # Convert to percentage
         final_df['IV_pct'] = final_df['IV'] * 100
