@@ -126,6 +126,15 @@ with st.sidebar:
     # Convert the percentage to a decimal for the Black-Scholes math
     risk_free = risk_free_percent / 100
     
+    min_volume = st.number_input(
+        "Minimum Volume", 
+        min_value=0, 
+        max_value=10000000, 
+        value=10000 ,
+        step=1000,
+        format="%d",
+        help="Minimum volume that the option contracts to have to be considered in the analysis."
+    )
     st.divider()
 
 # --- MAIN DISPLAY LOGIC ---
@@ -147,27 +156,41 @@ if st.session_state.active_df is not None:
         
         tte = get_tte(str(trading_date), selected_expiry)
         strike_range = 0.2
-        min_volume = 10000
-        upper_bound = final_df['SPOT'].values[0] * (1 + strike_range)
-        lower_bound = final_df['SPOT'].values[0] * (1 - strike_range)
+        # min_volume = 10000
+        spot_price = final_df['SPOT'].iloc[0]
+        upper_bound = spot_price * (1 + strike_range)
+        lower_bound = spot_price * (1 - strike_range)
         
         final_df = final_df[
             (final_df['STRIKE'] >= lower_bound) & 
             (final_df['STRIKE'] <= upper_bound)
         ].copy()
         final_df = final_df[final_df['OI'] > min_volume]
-        final_df['intrinsic'] = np.where(
-            final_df['TYPE'] == 'CE',
-            (final_df['SPOT'] - final_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
-            (final_df['STRIKE'] * np.exp(-risk_free * tte) - final_df['SPOT']))
-        final_df['intrinsic'] = final_df['intrinsic'].clip(lower=0)
-        final_df = final_df[final_df['CLOSE'] > final_df['intrinsic']].copy()
-        final_df = final_df[final_df['CLOSE'] > 1.0]
-        final_df['IV'] = final_df.apply(
+        # 1. Identify the ATM Strike
+        
+        atm_strike = final_df.iloc[(final_df['STRIKE'] - spot_price).abs().argsort()[:1]]['STRIKE'].values[0]
+        
+        # 2. Filter using the ATM strike as the pivot
+        otm_puts = final_df[(final_df['TYPE'] == 'PE') & (final_df['STRIKE'] <= atm_strike)]
+        otm_calls = final_df[(final_df['TYPE'] == 'CE') & (final_df['STRIKE'] >= atm_strike)]
+        
+        # 3. Combine
+        smile_df = pd.concat([otm_puts, otm_calls]).drop_duplicates(subset=['STRIKE', 'TYPE'])
+
+        # final_df = pd.concat([final_df[(final_df['TYPE']=='PE')&(final_df['STRIKE']<final_df['SPOT'])],\
+        #                       final_df[(final_df['TYPE']=='CE')&(final_df['STRIKE']>final_df['SPOT'])]])
+        smile_df['intrinsic'] = np.where(
+            smile_df['TYPE'] == 'CE',
+            (smile_df['SPOT'] - smile_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
+            (smile_df['STRIKE'] * np.exp(-risk_free * tte) - smile_df['SPOT']))
+        smile_df['intrinsic'] = smile_df['intrinsic'].clip(lower=0)
+        smile_df = smile_df[smile_df['CLOSE'] > smile_df['intrinsic']].copy()
+        smile_df = smile_df[smile_df['CLOSE'] > 1.0]
+        smile_df['IV'] = smile_df.apply(
             lambda row: find_iv(row['CLOSE'], row['SPOT'], row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
         )
         # Convert to percentage
-        final_df['IV_pct'] = final_df['IV'] * 100
+        smile_df['IV_pct'] = smile_df['IV'] * 100
         
     # 3. Visualization
 #    st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
@@ -204,7 +227,7 @@ if st.session_state.active_df is not None:
     with col2:
         # Plot 2: Implied Volatility (The Smile)
         fig_iv = px.line(
-            final_df, 
+            smile_df, 
             x="STRIKE", 
             y="IV_pct", 
             color="TYPE",
@@ -218,6 +241,6 @@ if st.session_state.active_df is not None:
         st.plotly_chart(fig_iv, use_container_width=True)
         # 4. Data Table
     with st.expander("View Filtered Data Table"):
-                st.dataframe(final_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']].sort_values(by=['TYPE','STRIKE']), use_container_width=True)
+        st.dataframe(smile_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']].sort_values(by=['TYPE','STRIKE']), use_container_width=True)
 else:
     st.info("Please select a date and click 'Get Data' in the sidebar to begin.")
