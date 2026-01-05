@@ -9,6 +9,7 @@ from datetime import datetime
 from scipy.optimize import brentq
 import numpy as np
 from scipy.stats import norm
+
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Nifty Maturity Hub", layout="wide")
 CACHE_DIR = "data_cache"
@@ -17,7 +18,7 @@ if not os.path.exists(CACHE_DIR) : os.makedirs(CACHE_DIR)
 # --- INITIALIZE SESSION STATE ---
 # This prevents the AttributeError
 if 'active_df' not in st.session_state: st.session_state.active_df = None
-if 'spot' not in st.session_state: st.session_state.spot = 0.0
+
 
 # --- BLACK-SCHOLES ENGINE ---
 def black_scholes(S, K, T, r, sigma, option_type='CE'):
@@ -143,11 +144,11 @@ if st.session_state.active_df is not None:
 
     # Calculate IV for each row
     with st.spinner("Calculating Implied Volatility..."):
-        spot = st.session_state.spot
+        
         tte = get_tte(str(trading_date), selected_expiry)
         
         final_df['IV'] = final_df.apply(
-            lambda row: find_iv(row['CLOSE'], spot, row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
+            lambda row: find_iv(row['CLOSE'], row['UndrlygPric'], row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
         )
         # Convert to percentage
         final_df['IV_pct'] = final_df['IV'] * 100
