@@ -5,3 +5,4 @@ plotly
 nselib
 yfinance
 streamlit-autorefresh
+nsepython
