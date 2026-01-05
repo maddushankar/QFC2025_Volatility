@@ -6,7 +6,9 @@ import zipfile
 import io
 import os
 from datetime import datetime
-
+from scipy.optimize import brentq
+import numpy as np
+from scipy.stats import norm
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Nifty Maturity Hub", layout="wide")
 CACHE_DIR = "data_cache"
@@ -27,13 +29,20 @@ def black_scholes(S, K, T, r, sigma, option_type='CE'):
         return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
 def find_iv(market_price, S, K, T, r, option_type):
-    if market_price <= 0: return 0.0
+    # Rule 1: Ignore junk prices
+    if market_price <= 0.5: 
+        return 0.0
+    
+    # Rule 2: Define the target function (Raw difference, not squared)
+    def objective_function(sigma):
+        return black_scholes(S, K, T, r, sigma, option_type) - market_price
+
     try:
-        # We find the root where (BS_Price - Market_Price) == 0
-        func = lambda sigma: black_scholes(S, K, T, r, sigma, option_type) - market_price
-        # Newton-Raphson solver starting at 20% vol
-        return newton(func, x0=0.2, tol=1e-5, maxiter=100)
-    except:
+        # Use brentq - it is much more stable than newton for IV
+        # It looks for a solution between 1% and 500% volatility
+        return brentq(objective_function, 0.01, 5.0, xtol=1e-5)
+    except (ValueError, RuntimeError):
+        # If the price is mathematically impossible (e.g. below intrinsic value)
         return 0.0
 def get_tte(trade_date_str, expiry_date_str):
     t = datetime.strptime(trade_date_str, '%Y-%m-%d')
