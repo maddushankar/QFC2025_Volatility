@@ -170,7 +170,7 @@ if st.session_state.active_df is not None:
 #                  markers=True, template="plotly_dark")
 #    st.plotly_chart(fig, use_container_width=True)
 # --- 3. SIDE-BY-SIDE VISUALIZATION ---
-st.subheader(f"📊 {symbol} Analysis - Expiry: {selected_expiry}")
+    st.subheader(f"📊 {symbol} Analysis - Expiry: {selected_expiry}")
 
     # Create two equal-width columns
     col1, col2 = st.columns(2)
