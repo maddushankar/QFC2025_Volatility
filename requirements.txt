@@ -8,6 +8,6 @@ nsepython
 yfinance>=0.2.65
 alpaca-py
 jugaad-data
-numpy
+numpy<2.0.0
 scipy
 sympy
