@@ -13,7 +13,29 @@ CACHE_DIR = "data_cache"
 
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
+def black_scholes(S, K, T, r, sigma, option_type='CE'):
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    if option_type == 'CE':
+        return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    else:
+        return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
+def find_iv(market_price, S, K, T, r, option_type):
+    if market_price <= 0: return 0.0
+    try:
+        # We find the root where (BS_Price - Market_Price) == 0
+        func = lambda sigma: black_scholes(S, K, T, r, sigma, option_type) - market_price
+        # Newton-Raphson solver starting at 20% vol
+        return newton(func, x0=0.2, tol=1e-5, maxiter=100)
+    except:
+        return 0.0
+def get_tte(trade_date_str, expiry_date_str):
+    t = datetime.strptime(trade_date_str, '%Y-%m-%d')
+    e = datetime.strptime(expiry_date_str, '%Y-%m-%d')
+    days = (e - t).days
+    return max(days, 1) / 365.0  # Time in years
+    
 # --- CORE FUNCTION: Download & Extract ---
 def get_nifty_data(target_date):
     date_str = target_date.strftime("%Y%m%d")
@@ -89,18 +111,31 @@ if st.session_state.active_df is not None:
     
     # 2. Final Filtered Data
     final_df = df_symbol[df_symbol['EXPIRY'] == selected_expiry].sort_values("STRIKE")
-    
+
+    # Calculate IV for each row
+    with st.spinner("Calculating Implied Volatility..."):
+        spot = st.session_state.spot
+        tte = get_tte(str(trading_date), selected_expiry)
+        
+        final_df['IV'] = final_df.apply(
+            lambda row: find_iv(row['CLOSE'], spot, row['STRIKE'], tte, rfr, row['TYPE']), axis=1
+        )
+        # Convert to percentage
+        final_df['IV_pct'] = plot_df['IV'] * 100
+        
     # 3. Visualization
     st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
     
     fig = px.line(final_df, x="STRIKE", y="CLOSE", color="TYPE",
                   labels={"STRIKE": "Strike Price", "CLOSE": "Closing Price"},
                   markers=True, template="plotly_dark")
-    
+    fig = px.line(final_df, x="STRIKE", y="IV_pct", color="TYPE",
+                  labels={"STRIKE": "Strike Price", "IV_Pct": "Implied Volatility (BS)"},
+                  markers=True, template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
 
     # 4. Data Table
     with st.expander("View Filtered Data Table"):
-        st.dataframe(final_df[['STRIKE', 'TYPE', 'CLOSE', 'OI']], use_container_width=True)
+        st.dataframe(final_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']], use_container_width=True)
 else:
     st.info("Please select a date and click 'Get Data' in the sidebar to begin.")
