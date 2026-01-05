@@ -101,6 +101,21 @@ with st.sidebar:
             else:
                 st.error(result)
 
+    # 2. Risk-Free Rate Input
+    # We use format="%.2f" to show two decimal places
+    risk_free_percent = st.number_input(
+        "Risk-Free Rate (%)", 
+        min_value=0.0, 
+        max_value=15.0, 
+        value=7.0, 
+        step=0.05,
+        format="%.2f",
+        help="The annual yield of a risk-free bond (like a Govt Treasury Bond)."
+    )
+    
+    # Convert the percentage to a decimal for the Black-Scholes math
+    risk_free = risk_free_percent / 100
+    
     st.divider()
 
 # --- MAIN DISPLAY LOGIC ---
