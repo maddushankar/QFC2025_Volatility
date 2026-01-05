@@ -5,18 +5,25 @@ import pandas as pd
 st.subheader("📊 Live NSE Option Chain")
 
 # --- OPTION CHAIN FETCHING ---
-@st.cache_data(ttl=60)  # Refresh every 60 seconds for live data
+@st.cache_data(ttl=60)
 def get_option_chain(symbol):
     try:
-        # Fetches the raw JSON and parses it into a structured format
+        # Fetching raw payload
         payload = nse_optionchain_scrapper(symbol)
         
-        # Extract the relevant data rows
-        data = payload['filtered']['data']
-        
+        # FIX: Check if 'filtered' exists before accessing it
+        if payload and 'filtered' in payload:
+            data = payload['filtered']['data']
+        elif payload and 'records' in payload:
+            # Fallback to 'records' if 'filtered' is missing
+            data = payload['records']['data']
+        else:
+            st.error("NSE API returned an unexpected format. No 'filtered' or 'records' key found.")
+            return pd.DataFrame()
+
         chain_list = []
         for row in data:
-            strike = row['strikePrice']
+            strike = row.get('strikePrice')
             ce = row.get('CE', {})
             pe = row.get('PE', {})
             
@@ -29,8 +36,9 @@ def get_option_chain(symbol):
             })
             
         return pd.DataFrame(chain_list)
+        
     except Exception as e:
-        st.error(f"NSE API error: {e}")
+        st.error(f"Error: {e}")
         return pd.DataFrame()
 
 # --- DISPLAY LOGIC ---
