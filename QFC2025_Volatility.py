@@ -21,27 +21,25 @@ if 'active_df' not in st.session_state: st.session_state.active_df = None
 
 
 # --- BLACK-SCHOLES ENGINE ---
-def black_scholes(S, K, T, r, sigma, option_type='CE'):
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+def black_scholes(F, K, T, sigma, option_type='CE'):
+    d1 = (np.log(F / K) + (0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     if option_type == 'CE':
-        return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+        return (F * norm.cdf(d1) - K * norm.cdf(d2)) * np.exp(-0.05 * T) # Disount factor is negligible for IV shape
     else:
-        return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+        return (K * norm.cdf(-d2) - F * norm.cdf(-d1)) * np.exp(-0.05 * T)
 
-def find_iv(market_price, S, K, T, r, option_type):
-    # Rule 1: Ignore junk prices
-    if market_price <= 0.5: 
-        return 0.0
+def find_iv(market_price, F, K, T, option_type):
+    if market_price <= 0.5: return 0.0
     
-    # Rule 2: Define the target function (Raw difference, not squared)
-    def objective_function(sigma):
-        return black_scholes(S, K, T, r, sigma, option_type) - market_price
+    def objective(sigma):
+        return black_scholes(F, K, T, sigma, option_type) - market_price
 
-    #try:
-        # Use brentq - it is much more stable than newton for IV
-        # It looks for a solution between 1% and 500% volatility
-    return brentq(objective_function, 0.01, 5.0, xtol=1e-5)
+    try:
+        # Solving for sigma between 0.1% and 500%
+        return brentq(objective, 0.001, 5.0, xtol=1e-5)
+    except:
+        return np.nan
     #except (ValueError, RuntimeError):
         # If the price is mathematically impossible (e.g. below intrinsic value)
         #return 0.0
@@ -111,20 +109,20 @@ with st.sidebar:
             else:
                 st.error(result)
 
-    # 2. Risk-Free Rate Input
-    # We use format="%.2f" to show two decimal places
-    risk_free_percent = st.number_input(
-        "Risk-Free Rate (%)", 
-        min_value=0.0, 
-        max_value=15.0, 
-        value=7.0, 
-        step=0.05,
-        format="%.2f",
-        help="The annual yield of a risk-free bond (like a Govt Treasury Bond)."
-    )
+    # # 2. Risk-Free Rate Input
+    # # We use format="%.2f" to show two decimal places
+    # risk_free_percent = st.number_input(
+    #     "Risk-Free Rate (%)", 
+    #     min_value=0.0, 
+    #     max_value=15.0, 
+    #     value=7.0, 
+    #     step=0.05,
+    #     format="%.2f",
+    #     help="The annual yield of a risk-free bond (like a Govt Treasury Bond)."
+    # )
     
-    # Convert the percentage to a decimal for the Black-Scholes math
-    risk_free = risk_free_percent / 100
+    # # Convert the percentage to a decimal for the Black-Scholes math
+    # risk_free = risk_free_percent / 100
     
     min_volume = st.number_input(
         "Minimum Volume", 
@@ -173,21 +171,28 @@ if st.session_state.active_df is not None:
         # 2. Filter using the ATM strike as the pivot
         otm_puts = final_df[(final_df['TYPE'] == 'PE') & (final_df['STRIKE'] <= atm_strike)]
         otm_calls = final_df[(final_df['TYPE'] == 'CE') & (final_df['STRIKE'] >= atm_strike)]
+        atm_call = final_df[(final_df['STRIKE'] == atm_strike) & (final_df['TYPE'] == 'CE')]['CLOSE'].mean()
+        atm_put = final_df[(final_df['STRIKE'] == atm_strike) & (final_df['TYPE'] == 'PE')]['CLOSE'].mean()
+        synthetic_fwd = atm_strike + (atm_call - atm_put)
         
         # 3. Combine
         smile_df = pd.concat([otm_puts, otm_calls]).drop_duplicates(subset=['STRIKE', 'TYPE'])
 
         # final_df = pd.concat([final_df[(final_df['TYPE']=='PE')&(final_df['STRIKE']<final_df['SPOT'])],\
         #                       final_df[(final_df['TYPE']=='CE')&(final_df['STRIKE']>final_df['SPOT'])]])
-        smile_df['intrinsic'] = np.where(
-            smile_df['TYPE'] == 'CE',
-            (smile_df['SPOT'] - smile_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
-            (smile_df['STRIKE'] * np.exp(-risk_free * tte) - smile_df['SPOT']))
+        # smile_df['intrinsic'] = np.where(
+        #     smile_df['TYPE'] == 'CE',
+        #     (smile_df['SPOT'] - smile_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
+        #     (smile_df['STRIKE'] * np.exp(-risk_free * tte) - smile_df['SPOT']))
+        smile_df['intrinsic'] = np.where(smile_df['TYPE'] == 'CE', 
+                                     (synthetic_fwd - smile_df['STRIKE']), 
+                                     (smile_df['STRIKE'] - synthetic_fwd))
+        
         smile_df['intrinsic'] = smile_df['intrinsic'].clip(lower=0)
         smile_df = smile_df[smile_df['CLOSE'] > smile_df['intrinsic']].copy()
         smile_df = smile_df[smile_df['CLOSE'] > 1.0]
         smile_df['IV'] = smile_df.apply(
-            lambda row: find_iv(row['CLOSE'], row['SPOT'], row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
+            lambda row: find_iv(row['CLOSE'], synthetic_fwd, row['STRIKE'], tte, row['TYPE']), axis=1
         )
         # Convert to percentage
         smile_df['IV_pct'] = smile_df['IV'] * 100
@@ -230,13 +235,17 @@ if st.session_state.active_df is not None:
             smile_df, 
             x="STRIKE", 
             y="IV_pct", 
-            color="TYPE",
-            title="Implied Volatility (Smile)",
+            
+            title="Implied Volatility (Smile) - OTM CE and OTM PE",
             labels={"STRIKE": "Strike", "IV_pct": "IV (%)"},
-            color_discrete_map={'CE': '#00ff00', 'PE': '#ff0000'},
-            markers=True, 
+            markers=False, 
             template="plotly_dark"
         )
+        fig_iv.update_layout(hovermode="x unified")
+        
+        # 3. Add the Spot Line and Layout updates
+        current_spot = smile_df['SPOT'].iloc[0]
+        fig_iv.add_vline(x=current_spot, line_dash="dash", line_color="grey", annotation_text="SPOT")
         fig_iv.update_layout(hovermode="x unified")
         st.plotly_chart(fig_iv, use_container_width=True)
         # 4. Data Table
