@@ -123,7 +123,7 @@ if st.session_state.active_df is not None:
         tte = get_tte(str(trading_date), selected_expiry)
         
         final_df['IV'] = final_df.apply(
-            lambda row: find_iv(row['CLOSE'], spot, row['STRIKE'], tte, rfr, row['TYPE']), axis=1
+            lambda row: find_iv(row['CLOSE'], spot, row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
         )
         # Convert to percentage
         final_df['IV_pct'] = plot_df['IV'] * 100
