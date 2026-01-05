@@ -141,7 +141,7 @@ if st.session_state.active_df is not None:
             lambda row: find_iv(row['CLOSE'], spot, row['STRIKE'], tte, risk_free, row['TYPE']), axis=1
         )
         # Convert to percentage
-        final_df['IV_pct'] = plot_df['IV'] * 100
+        final_df['IV_pct'] = final_df['IV'] * 100
         
     # 3. Visualization
     st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
