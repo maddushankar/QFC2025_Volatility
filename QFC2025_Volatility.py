@@ -1,17 +1,23 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
+import requests
+import zipfile
+import io
 import os
+from datetime import datetime
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Nifty Maturity Hub", layout="wide")
 CACHE_DIR = "data_cache"
 
-@st.cache_data(show_spinner="Downloading from NSE...")
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+# --- CORE FUNCTION: Download & Extract ---
 def get_nifty_data(target_date):
     date_str = target_date.strftime("%Y%m%d")
-    # New UDiFF URL Pattern
+    # Official NSE UDiFF URL Pattern
     url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{date_str}_F_0000.csv.zip"
     local_filename = f"{CACHE_DIR}/fo_{date_str}.csv"
 
@@ -35,74 +41,66 @@ def get_nifty_data(target_date):
                 csv_name = z.namelist()[0]
                 with z.open(csv_name) as f:
                     df = pd.read_csv(f)
-                    # Standardize UDiFF columns for easier use
                     df.columns = [c.strip() for c in df.columns]
-                    # Save to Disk Cache for future reboots
+                    # Map new ISO Tags to readable names immediately
+                    cols = {
+                        'TckrSymb': 'SYMBOL', 'XpryDt': 'EXPIRY', 'StrkPric': 'STRIKE',
+                        'OptnTp': 'TYPE', 'ClsPric': 'CLOSE', 'OpnIntrst': 'OI'
+                    }
+                    df = df.rename(columns=cols)
                     df.to_csv(local_filename, index=False)
                     return df
         else:
-            return f"Error: Status {response.status_code} (Market likely closed)"
+            return f"NSE Error: Status {response.status_code}. Is it a holiday?"
     except Exception as e:
         return f"Request failed: {str(e)}"
-# --- SIDEBAR: Controls ---
+
+# --- SIDEBAR & SESSION STATE ---
+if 'active_df' not in st.session_state:
+    st.session_state.active_df = None
+
 with st.sidebar:
     st.header("📅 Data Controls")
-    # Step 1: Select the Trading Day (The day the data was recorded)
     trading_date = st.date_input("Trading Day", value=datetime(2025, 12, 31))
     symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY"])
     
+    # TRIGGER BUTTON
+    if st.button("🚀 Get Data", use_container_width=True):
+        with st.spinner("Fetching from NSE Archives..."):
+            result = get_nifty_data(trading_date)
+            if isinstance(result, pd.DataFrame):
+                st.session_state.active_df = result
+                st.success("Data Loaded!")
+            else:
+                st.error(result)
+
     st.divider()
-    st.info("Download the day's file first to see available maturities.")
 
-# --- CORE FUNCTION: Load Data ---
-@st.cache_data
-def load_and_standardize(date_obj):
-    date_str = date_obj.strftime("%Y%m%d")
-    file_path = f"{CACHE_DIR}/fo_{date_str}.csv"
+# --- MAIN DISPLAY LOGIC ---
+if st.session_state.active_df is not None:
+    df = st.session_state.active_df
     
-    if not os.path.exists(file_path):
-        return None # In a real app, call your download function here
-    data = get_nifty_data(date_obj)
-    df = pd.read_csv(file_path)
-    # Mapping UDiFF ISO Tags to readable names
-    cols = {
-        'TckrSymb': 'SYMBOL',
-        'XpryDt': 'EXPIRY',
-        'StrkPric': 'STRIKE',
-        'OptnTp': 'TYPE',
-        'ClsPric': 'CLOSE',
-        'OpnIntrst': 'OI'
-    }
-    df = df.rename(columns=cols)
-    return df
-
-# --- MAIN LOGIC ---
-df = load_and_standardize(trading_date)
-
-if df is not None:
-    # Filter for NIFTY/BANKNIFTY
+    # Filter for Symbol
     df_symbol = df[df['SYMBOL'] == symbol].copy()
     
-    # Step 2: Dynamically update sidebar with available Expiries
-    available_expiries = sorted(df_symbol['EXPIRY'].unique())
-    selected_expiry = st.sidebar.selectbox("Maturity / Expiry", available_expiries)
+    # 1. Maturity Selector (Now that data exists)
+    all_expiries = sorted(df_symbol['EXPIRY'].unique())
+    selected_expiry = st.sidebar.selectbox("Select Maturity", all_expiries)
     
-    # Final Filtering
+    # 2. Final Filtered Data
     final_df = df_symbol[df_symbol['EXPIRY'] == selected_expiry].sort_values("STRIKE")
     
-    # --- VISUALIZATION ---
-    st.subheader(f"Close Prices for {symbol} - Expiry: {selected_expiry}")
+    # 3. Visualization
+    st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
     
-    # Comparison Chart: CE vs PE Close Prices
     fig = px.line(final_df, x="STRIKE", y="CLOSE", color="TYPE",
-                  title=f"Closing Prices by Strike ({selected_expiry})",
-                  labels={"STRIKE": "Strike Price", "CLOSE": "Closing Price (LTP)"},
-                  markers=True)
+                  labels={"STRIKE": "Strike Price", "CLOSE": "Closing Price"},
+                  markers=True, template="plotly_dark")
     
     st.plotly_chart(fig, use_container_width=True)
 
-    # Raw Data Table
-    with st.expander("View Raw Data Table"):
+    # 4. Data Table
+    with st.expander("View Filtered Data Table"):
         st.dataframe(final_df[['STRIKE', 'TYPE', 'CLOSE', 'OI']], use_container_width=True)
 else:
-    st.warning(f"No cached data found for {trading_date}. Please trigger a download first.")
+    st.info("Please select a date and click 'Get Data' in the sidebar to begin.")
