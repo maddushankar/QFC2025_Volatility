@@ -1,73 +1,79 @@
 import streamlit as st
 import pandas as pd
-from jugaad_data.nse import bhavcopy_fo_save
-from datetime import date, datetime
+import requests
+import zipfile
+import io
 import os
-import plotly.express as px
+from datetime import datetime
 
-st.set_page_config(page_title="NSE Historical Options Hub", layout="wide")
+# --- CONFIG ---
+st.set_page_config(page_title="NSE UDiFF Dashboard", layout="wide")
+CACHE_DIR = "data_cache"
 
-st.title("📊 Nifty Historical Options Data (Bhavcopy)")
-st.info("Choose a historical date to download the End-of-Day (EOD) options report.")
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
 
-# --- SIDEBAR CONTROLS ---
-with st.sidebar:
-    st.header("Search Filters")
-    # Markets are closed on weekends; users should pick a weekday
-    selected_date = st.date_input("Select Historical Date", value=date(2025, 1, 1))
-    symbol = st.selectbox("Underlying Asset", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
+# --- CACHED DOWNLOADER ---
+@st.cache_data(show_spinner="Downloading from NSE...")
+def get_nifty_data(target_date):
+    date_str = target_date.strftime("%Y%m%d")
+    # New UDiFF URL Pattern
+    url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{date_str}_F_0000.csv.zip"
+    local_filename = f"{CACHE_DIR}/fo_{date_str}.csv"
 
-# --- DATA PROCESSING ---
-def get_historical_data(target_date):
-    # Create a temporary directory to store the downloaded CSV
-    tmp_path = "./data_cache"
-    if not os.path.exists(tmp_path):
-        os.makedirs(tmp_path)
+    # Step 1: Check Disk Cache First
+    if os.path.exists(local_filename):
+        return pd.read_csv(local_filename)
+
+    # Step 2: Download if not in Cache
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.nseindia.com/"
+    }
     
     try:
-        # Downloads the FO Bhavcopy for that specific date
-        file_path = bhavcopy_fo_save(target_date, tmp_path)
-        df = pd.read_csv(file_path)
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5) # Handshake
+        response = session.get(url, headers=headers, timeout=15)
         
-        # Clean the column names (NSE sometimes has leading/trailing spaces)
-        df.columns = [c.strip() for c in df.columns]
-        
-        # Filter for the selected index and only 'OPTIDX' (Option Index)
-        df = df[(df['SYMBOL'] == symbol) & (df['INSTRUMENT'] == 'OPTIDX')]
-        return df
+        if response.status_code == 200:
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                csv_name = z.namelist()[0]
+                with z.open(csv_name) as f:
+                    df = pd.read_csv(f)
+                    # Standardize UDiFF columns for easier use
+                    df.columns = [c.strip() for c in df.columns]
+                    # Save to Disk Cache for future reboots
+                    df.to_csv(local_filename, index=False)
+                    return df
+        else:
+            return f"Error: Status {response.status_code} (Market likely closed)"
     except Exception as e:
-        st.error(f"Could not find data for {target_date}. The market might have been closed or data is not yet available.")
-        return None
+        return f"Request failed: {str(e)}"
 
-# --- MAIN DASHBOARD ---
-if st.button("Fetch Historical Chain"):
-    raw_df = get_historical_data(selected_date)
+# --- MAIN UI ---
+st.title("📊 NSE Historical Volatility Hub (UDiFF)")
+
+with st.sidebar:
+    st.header("Settings")
+    picked_date = st.date_input("Select Date", value=datetime(2025, 12, 31))
+    symbol = st.selectbox("Symbol", ["NIFTY", "BANKNIFTY"])
+
+data = get_nifty_data(picked_date)
+
+if isinstance(data, pd.DataFrame):
+    # Filter for specific symbol and options
+    # UDiFF Headers: TckrSymb (Symbol), OptnTp (Type), StrkPric (Strike)
+    df_filtered = data[data['TckrSymb'] == symbol].copy()
     
-    if raw_df is not None:
-        # Allow user to filter by Maturity (EXPIRY_DT)
-        all_expiries = sorted(raw_df['EXPIRY_DT'].unique())
-        selected_expiry = st.selectbox("Select Maturity / Expiry Date", all_expiries)
-        
-        final_df = raw_df[raw_df['EXPIRY_DT'] == selected_expiry].copy()
-        
-        # Sort by strike for better visualization
-        final_df = final_df.sort_values("STRIKE_PR")
+    st.success(f"Loaded {len(df_filtered)} contracts for {symbol}")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Total Open Interest", f"{df_filtered['OpnIntrst'].sum():,.0f}")
+    with col2:
+        st.metric("Unique Strikes", len(df_filtered['StrkPric'].unique()))
 
-        # Layout: Visualization & Table
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader(f"Open Interest Distribution - {selected_expiry}")
-            # Plotting OI for Calls vs Puts
-            fig = px.bar(final_df, x="STRIKE_PR", y="OPEN_INT", color="OPTION_TYP",
-                         barmode="group", title="OI by Strike Price")
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col2:
-            st.subheader("Raw Data Table")
-            display_cols = ['STRIKE_PR', 'OPTION_TYP', 'CLOSE', 'OPEN_INT', 'CHG_IN_OI']
-            st.dataframe(final_df[display_cols], height=500)
-            
-        # Download Link for the team
-        csv = final_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download filtered CSV", data=csv, file_name=f"{symbol}_{selected_expiry}_data.csv")
+    st.dataframe(df_filtered, use_container_width=True)
+else:
+    st.error(data)
