@@ -4,3 +4,4 @@ requests
 plotly
 nselib
 yfinance
+streamlit-autorefresh
