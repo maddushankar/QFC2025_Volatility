@@ -1,82 +1,53 @@
 import streamlit as st
-import yfinance as yf
+from nsepython import nse_optionchain_scrapper
 import pandas as pd
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
 
-# 1. PAGE CONFIG MUST BE THE FIRST STREAMLIT COMMAND
-st.set_page_config(page_title="Team Finance Dashboard", layout="wide")
+st.subheader("📊 Live NSE Option Chain")
 
-st.title("📈 NSE Historical Analysis")
-st.write("Hello team! This is our shared workspace for Volatility analysis.")
+# --- OPTION CHAIN FETCHING ---
+@st.cache_data(ttl=60)  # Refresh every 60 seconds for live data
+def get_option_chain(symbol):
+    try:
+        # Fetches the raw JSON and parses it into a structured format
+        payload = nse_optionchain_scrapper(symbol)
+        
+        # Extract the relevant data rows
+        data = payload['filtered']['data']
+        
+        chain_list = []
+        for row in data:
+            strike = row['strikePrice']
+            ce = row.get('CE', {})
+            pe = row.get('PE', {})
+            
+            chain_list.append({
+                "PE_OI": pe.get('openInterest', 0),
+                "PE_LTP": pe.get('lastPrice', 0),
+                "Strike": strike,
+                "CE_LTP": ce.get('lastPrice', 0),
+                "CE_OI": ce.get('openInterest', 0)
+            })
+            
+        return pd.DataFrame(chain_list)
+    except Exception as e:
+        st.error(f"NSE API error: {e}")
+        return pd.DataFrame()
 
-# --- SIDEBAR CONTROLS ---
-with st.sidebar:
-    st.header("Configuration")
-    ticker_input = st.text_input("Enter NSE Stock Symbol", value="RELIANCE").upper()
-    index_choice = st.selectbox("Or select an Index", ["None", "NIFTY 50", "BANK NIFTY"])
+# --- DISPLAY LOGIC ---
+target_symbol = st.selectbox("Select Underlying", ["NIFTY", "BANKNIFTY", "RELIANCE", "TCS"])
+
+if st.button("Load Option Chain"):
+    df_chain = get_option_chain(target_symbol)
     
-    # Corrected Mapping Logic
-    if index_choice == "NIFTY 50":
-        ticker = "^NSEI"
-    elif index_choice == "BANK NIFTY":
-        ticker = "^NSEBANK"
-    else:
-        # If 'None' is selected, use the manual text input
-        ticker = f"{ticker_input}.NS"
-
-    days_back = st.slider("Past Days", min_value=30, max_value=365*5, value=365)
-    start_date = datetime.now() - timedelta(days=days_back)
-
-# --- DATA FETCHING ---
-@st.cache_data(ttl=3600)
-def get_yf_data(symbol, start):
-    # Fetching data using yfinance
-    data = yf.download(symbol, start=start)
-    return data
-
-# --- MAIN DISPLAY ---
-try:
-    df = get_yf_data(ticker, start_date)
-
-    if df.empty:
-        st.warning(f"⚠️ No data found for {ticker}. Check the symbol naming.")
-    else:
-        st.subheader(f"Price Action for {ticker}")
+    if not df_chain.empty:
+        # Highlight the At-The-Money (ATM) strike roughly
+        st.write(f"Showing Option Chain for {target_symbol}")
         
-        # Create Candlestick Chart
-        fig = go.Figure(data=[go.Candlestick(
-            x=df.index,
-            open=df['Open'],
-            high=df['High'],
-            low=df['Low'],
-            close=df['Close'],
-            name="Market Data"
-        )])
-
-        fig.update_layout(
-            xaxis_rangeslider_visible=False,
-            template="plotly_dark",
-            yaxis_title="Price (INR)",
-            height=500
+        # Basic formatting to look like a trading terminal
+        st.dataframe(
+            df_chain.style.background_gradient(subset=['CE_OI', 'PE_OI'], cmap='Greens'),
+            use_container_width=True
         )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Team Data Tools
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("### Recent Data (Last 5 Days)")
-            st.dataframe(df.tail(5))
         
-        with col2:
-            st.write("### Team Export")
-            csv = df.to_csv().encode('utf-8')
-            st.download_button("Download CSV", data=csv, file_name=f"{ticker}_data.csv")
-
-except Exception as e:
-    st.error(f"Error fetching data: {e}")
-
-# Bottom refresh button for the team
-if st.button("🔄 Force Refresh Cache"):
-    get_yf_data.clear()
-    st.rerun()
+        # --- VOLATILITY ANALYSIS ---
+        st.info("💡 Heavy OI in CE usually acts as resistance; heavy PE OI acts as support.")
