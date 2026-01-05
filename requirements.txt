@@ -7,3 +7,4 @@ streamlit-autorefresh
 nsepython
 yfinance>=0.2.65
 alpaca-py
+jugaad-data
