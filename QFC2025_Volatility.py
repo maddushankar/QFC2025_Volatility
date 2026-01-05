@@ -9,6 +9,22 @@ from datetime import datetime
 from scipy.optimize import brentq
 import numpy as np
 from scipy.stats import norm
+from scipy.optimize import minimize
+import plotly.express as px          # For quick scaffolding
+import plotly.graph_objects as go    # For complex layering (PDF, SVI)
+
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("vol_hub.log"), # Saves to a file
+        logging.StreamHandler()             # Prints to your Spyder/Terminal console
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Nifty Maturity Hub", layout="wide")
@@ -48,7 +64,101 @@ def get_tte(trade_date_str, expiry_date_str):
     e = datetime.strptime(expiry_date_str, '%Y-%m-%d')
     days = (e - t).days
     return max(days, 1) / 365.0  # Time in years
+
+
+
+
+def svi_formula(params, k):
+    """Raw SVI Parameterization"""
+    a, b, rho, m, sigma = params
+    return a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
+
+def svi_objective(params, k, w_market):
+    """Objective function: Mean Squared Error"""
+    # Constraints: b >= 0, |rho| <= 1, sigma > 0, a + b*sigma*sqrt(1-rho^2) >= 0
+    a, b, rho, m, sigma = params
+    if b < 0 or abs(rho) > 1 or sigma <= 0:
+        return 1e10
     
+    w_model = svi_formula(params, k)
+    return np.sum((w_model - w_market)**2)
+
+def fit_svi(smile_df, fwd_price, tte):
+    # 1. Prepare data for SVI (Log-Moneyness and Total Variance)
+    # k = log(K/F), w = IV^2 * T
+    smile_df['k'] = np.log(smile_df['STRIKE'] / fwd_price)
+    smile_df['w_market'] = (smile_df['IV_pct'] / 100)**2 * tte
+    
+    k_arr = smile_df['k'].values
+    w_arr = smile_df['w_market'].values
+
+    # 2. Initial Guess [a, b, rho, m, sigma]
+    # a: vertical shift, b: slope, rho: rotation, m: horizontal shift, sigma: curvature
+    # Updated Bounds to prevent 'Degenerate' fits
+    bounds = [
+    (1e-5, 0.5),      # a > 0
+    (1e-3, 0.5),      # b > 0 (forces wings to exist)
+    (-0.9, 0.9),      # rho (keeps it from becoming a straight line)
+    (-0.5, 0.5),      # m
+    (0.01, 0.2)       # sigma (forces a rounded bottom)
+        ]
+    
+    # Better Initial Guess based on your market data
+    # a should roughly be the ATM Variance
+    # Use the actual lowest IV point to center the model
+    min_idx = smile_df['IV_pct'].idxmin()
+    initial_m = np.log(smile_df.loc[min_idx, 'STRIKE'] / synthetic_fwd)
+    initial_a = (smile_df['IV_pct'].min() / 100)**2 * tte
+    
+    # [a, b, rho, m, sigma]
+    initial_guess = [initial_a, 0.1, -0.5, initial_m, 0.1]
+    # initial_a = max(1e-4, w_arr.min())
+    # initial_guess = [initial_a, 0.05, -0.5, 0.0, 0.1]
+    # initial_guess = [0.01, 0.1, -0.5, 0.0, 0.1]
+    
+    # 3. Optimization
+    res = minimize(svi_objective, initial_guess, args=(k_arr, w_arr), method='SLSQP')
+    logger.info("Starting SVI Optimization...")
+    if res.success:
+        logger.info(f"SVI Fit Successful. Params: {res.x}")
+    else:
+        logger.warning(f"SVI Fit FAILED: {res.message}")
+    return res.x # Returns [a, b, rho, m, sigma]
+
+def get_svi_results(params, fwd_price, tte, strike_range):
+    # Create a dense strike grid for the PDF
+    strikes = np.linspace(strike_range[0], strike_range[1], 500)
+    k_grid = np.log(strikes / fwd_price)
+    
+    # Calculate Smoothed Variance and IV
+    w_svi = svi_formula(params, k_grid)
+    logger.info(f"SVI Fit Successful. Params: {w_svi}")
+    iv_svi = np.sqrt(w_svi / tte) * 100
+    
+    # Generate Theoretical Prices for PDF calculation
+    # Using small dk for numerical derivative
+    def get_price(K):
+        k = np.log(K / fwd_price)
+        sig = np.sqrt(svi_formula(params, k) / tte)
+        # Use your existing black_scholes_price function
+        return black_scholes(fwd_price, K, tte, sig, 'CE')
+
+    prices = np.array([get_price(s) for s in strikes])
+    
+    # PDF = Second derivative of Call Price w.r.t Strike
+    dk = strikes[1] - strikes[0]
+    pdf = np.gradient(np.gradient(prices, dk), dk)
+    
+    # Normalize PDF (Area = 1)
+    pdf = np.maximum(pdf, 0)
+    pdf /= np.trapz(pdf, strikes)
+    area = np.trapz(pdf, strikes)
+    logger.info(f"PDF Integration Area (pre-norm): {area:.6f}")
+    if area < 0.9:
+        logger.error("Probability Density area is dangerously low. Check SVI fit.")
+        
+    return strikes, iv_svi, pdf
+
 # --- CORE FUNCTION: Download & Extract ---
 def get_nifty_data(target_date):
     date_str = target_date.strftime("%Y%m%d")
@@ -100,7 +210,7 @@ with st.sidebar:
     symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY"])
     
     # TRIGGER BUTTON
-    if st.button("🚀 Get Data", use_container_width=True):
+    if st.button("🚀 Get Data", width="stretch"):
         with st.spinner("Fetching from NSE Archives..."):
             result = get_nifty_data(trading_date)
             if isinstance(result, pd.DataFrame):
@@ -137,119 +247,245 @@ with st.sidebar:
 
 # --- MAIN DISPLAY LOGIC ---
 if st.session_state.active_df is not None:
+    tab1, tab2 = st.tabs(["Volatility Smile & PDF", "Term Structure"])
     df = st.session_state.active_df
     
     # Filter for Symbol
     df_symbol = df[df['SYMBOL'] == symbol].copy()
     
-    # 1. Maturity Selector (Now that data exists)
-    all_expiries = sorted(df_symbol['EXPIRY'].unique())
-    selected_expiry = st.sidebar.selectbox("Select Maturity", all_expiries)
+    with tab2:
+        all_strikes = sorted(df_symbol['STRIKE'].unique())
+        col_select, col_empty = st.columns([2, 4])
+        with col_select:
+            selected_strike = st.selectbox("Select Strike", all_strikes)
+        st.divider()
+        # 2. Final Filtered Data
+        final_df = df_symbol[df_symbol['STRIKE'] == selected_strike].sort_values("EXPIRY")
+        st.subheader(f"📊 {symbol} Analysis - Expiry: {selected_strike}")
     
-    # 2. Final Filtered Data
-    final_df = df_symbol[df_symbol['EXPIRY'] == selected_expiry].sort_values("STRIKE")
-
-    # Calculate IV for each row
-    with st.spinner("Calculating Implied Volatility..."):
+        # Create two equal-width columns
+        col1, col2, col3 = st.columns(3)
         
-        tte = get_tte(str(trading_date), selected_expiry)
-        strike_range = 0.2
-        # min_volume = 10000
-        spot_price = final_df['SPOT'].iloc[0]
-        upper_bound = spot_price * (1 + strike_range)
-        lower_bound = spot_price * (1 - strike_range)
+        with col1:
+            # Plot 1: Close Prices
+            fig_price = px.line(
+                final_df, 
+                x="EXPIRY", 
+                y="CLOSE", 
+                color="TYPE",
+                title="Option Closing Prices",
+                labels={"EXPIRY": "EXPIRY", "CLOSE": "Price (₹)"},
+                color_discrete_map={'CE': '#00ff00', 'PE': '#ff0000'},
+                markers=True, 
+                template="plotly_dark"
+            )
+            fig_price.update_layout(hovermode="x unified")
+            st.plotly_chart(fig_price, width="stretch")
         
-        final_df = final_df[
-            (final_df['STRIKE'] >= lower_bound) & 
-            (final_df['STRIKE'] <= upper_bound)
-        ].copy()
-        final_df = final_df[final_df['OI'] > min_volume]
-        # 1. Identify the ATM Strike
-        
-        atm_strike = final_df.iloc[(final_df['STRIKE'] - spot_price).abs().argsort()[:1]]['STRIKE'].values[0]
-        
-        # 2. Filter using the ATM strike as the pivot
-        otm_puts = final_df[(final_df['TYPE'] == 'PE') & (final_df['STRIKE'] <= atm_strike)]
-        otm_calls = final_df[(final_df['TYPE'] == 'CE') & (final_df['STRIKE'] >= atm_strike)]
-        atm_call = final_df[(final_df['STRIKE'] == atm_strike) & (final_df['TYPE'] == 'CE')]['CLOSE'].mean()
-        atm_put = final_df[(final_df['STRIKE'] == atm_strike) & (final_df['TYPE'] == 'PE')]['CLOSE'].mean()
-        synthetic_fwd = atm_strike + (atm_call - atm_put)
-        
-        # 3. Combine
-        smile_df = pd.concat([otm_puts, otm_calls]).drop_duplicates(subset=['STRIKE', 'TYPE'])
-
-        # final_df = pd.concat([final_df[(final_df['TYPE']=='PE')&(final_df['STRIKE']<final_df['SPOT'])],\
-        #                       final_df[(final_df['TYPE']=='CE')&(final_df['STRIKE']>final_df['SPOT'])]])
-        # smile_df['intrinsic'] = np.where(
-        #     smile_df['TYPE'] == 'CE',
-        #     (smile_df['SPOT'] - smile_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
-        #     (smile_df['STRIKE'] * np.exp(-risk_free * tte) - smile_df['SPOT']))
-        smile_df['intrinsic'] = np.where(smile_df['TYPE'] == 'CE', 
-                                     (synthetic_fwd - smile_df['STRIKE']), 
-                                     (smile_df['STRIKE'] - synthetic_fwd))
-        
-        smile_df['intrinsic'] = smile_df['intrinsic'].clip(lower=0)
-        smile_df = smile_df[smile_df['CLOSE'] > smile_df['intrinsic']].copy()
-        smile_df = smile_df[smile_df['CLOSE'] > 1.0]
-        smile_df['IV'] = smile_df.apply(
-            lambda row: find_iv(row['CLOSE'], synthetic_fwd, row['STRIKE'], tte, row['TYPE']), axis=1
-        )
-        # Convert to percentage
-        smile_df['IV_pct'] = smile_df['IV'] * 100
-        
-    # 3. Visualization
-#    st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
-#    
-#    fig = px.line(final_df, x="STRIKE", y="CLOSE", color="TYPE",
-#                  labels={"STRIKE": "Strike Price", "CLOSE": "Closing Price"},
-#                  markers=True, template="plotly_dark")
-#    fig = px.line(final_df, x="STRIKE", y="IV_pct", color="TYPE",
-#                  labels={"STRIKE": "Strike Price", "IV_Pct": "Implied Volatility (BS)"},
-#                  markers=True, template="plotly_dark")
-#    st.plotly_chart(fig, use_container_width=True)
-# --- 3. SIDE-BY-SIDE VISUALIZATION ---
-    st.subheader(f"📊 {symbol} Analysis - Expiry: {selected_expiry}")
-
-    # Create two equal-width columns
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Plot 1: Close Prices
-        fig_price = px.line(
-            final_df, 
-            x="STRIKE", 
-            y="CLOSE", 
-            color="TYPE",
-            title="Option Closing Prices",
-            labels={"STRIKE": "Strike", "CLOSE": "Price (₹)"},
-            color_discrete_map={'CE': '#00ff00', 'PE': '#ff0000'},
-            markers=True, 
-            template="plotly_dark"
-        )
-        fig_price.update_layout(hovermode="x unified")
-        st.plotly_chart(fig_price, use_container_width=True)
-    
-    with col2:
-        # Plot 2: Implied Volatility (The Smile)
-        fig_iv = px.line(
-            smile_df, 
-            x="STRIKE", 
-            y="IV_pct", 
+        # with col2:
+        #     # Plot 2: Implied Volatility (The Smile)
+        #     # 1. Create the base figure with Market IV
+        #     fig_iv = px.line(
+        #         smile_df, 
+        #         x="STRIKE", 
+        #         y="IV_pct", 
+        #         title="IV Smile: Market vs SVI (using OTM CE and OT PE, Synthetic Forwrard)",
+        #         markers=True,
+        #         template="plotly_dark"
+        #     )
+        #     fig_iv.update_traces(mode='markers')
+        #     # 2. Create a temporary figure for the SVI line
+        #     fig_svi_line = px.line(
+        #         pdf_df, 
+        #         x="STRIKE", 
+        #         y="IV_SVI"
+        #     )
             
-            title="Implied Volatility (Smile) - OTM CE and OTM PE",
-            labels={"STRIKE": "Strike", "IV_pct": "IV (%)"},
-            markers=False, 
-            template="plotly_dark"
-        )
-        fig_iv.update_layout(hovermode="x unified")
+        #     # 3. Change the SVI line color so it stands out
+        #     fig_svi_line.update_traces(line_color='#00d4ff', name='SVI Fit', showlegend=True)
+            
+        #     # 4. Add the traces from the SVI figure to the base figure
+        #     for trace in fig_svi_line.data:
+        #         fig_iv.add_trace(trace)
+            
+        #     # 5. Final updates and display
+        #     fig_iv.update_layout(hovermode="x unified")
+        #     st.plotly_chart(fig_iv, width="stretch")
+    with tab1:
+        # 1. Maturity Selector (Now that data exists)
+        all_expiries = sorted(df_symbol['EXPIRY'].unique())
+        col_select, col_empty = st.columns([2, 4])
+        with col_select:
+            selected_expiry = st.selectbox("Select Maturity", all_expiries)
+        st.divider()
+        # 2. Final Filtered Data
+        final_df = df_symbol[df_symbol['EXPIRY'] == selected_expiry].sort_values("STRIKE")
+    
+        # Calculate IV for each row
+        with st.spinner("Calculating Implied Volatility..."):
+            
+            tte = get_tte(str(trading_date), selected_expiry)
+            strike_range = 0.2
+            # min_volume = 10000
+            spot_price = final_df['SPOT'].iloc[0]
+            upper_bound = spot_price * (1 + strike_range)
+            lower_bound = spot_price * (1 - strike_range)
+            
+            final_df = final_df[
+                (final_df['STRIKE'] >= lower_bound) & 
+                (final_df['STRIKE'] <= upper_bound)
+            ].copy()
+            final_df = final_df[final_df['OI'] > min_volume]
+            # 1. Identify the ATM Strike
+            
+            atm_strike = final_df.iloc[(final_df['STRIKE'] - spot_price).abs().argsort()[:1]]['STRIKE'].values[0]
+            
+            # 2. Filter using the ATM strike as the pivot
+            otm_puts = final_df[(final_df['TYPE'] == 'PE') & (final_df['STRIKE'] <= atm_strike)]
+            otm_calls = final_df[(final_df['TYPE'] == 'CE') & (final_df['STRIKE'] >= atm_strike)]
+            atm_call = final_df[(final_df['STRIKE'] == atm_strike) & (final_df['TYPE'] == 'CE')]['CLOSE'].mean()
+            atm_put = final_df[(final_df['STRIKE'] == atm_strike) & (final_df['TYPE'] == 'PE')]['CLOSE'].mean()
+            
+            synthetic_fwd = atm_strike + (atm_call - atm_put)
+    
+            # --- Inside your Data Processing block ---
+            logger.info(f"Processing symbol: {symbol}")
+            logger.info(f"Spot: {spot_price} | Synthetic Fwd: {synthetic_fwd:.2f}")
+    
+            # 3. Combine
+            smile_df = pd.concat([otm_puts, otm_calls]).drop_duplicates(subset=['STRIKE', 'TYPE'])
+    
+            # final_df = pd.concat([final_df[(final_df['TYPE']=='PE')&(final_df['STRIKE']<final_df['SPOT'])],\
+            #                       final_df[(final_df['TYPE']=='CE')&(final_df['STRIKE']>final_df['SPOT'])]])
+            # smile_df['intrinsic'] = np.where(
+            #     smile_df['TYPE'] == 'CE',
+            #     (smile_df['SPOT'] - smile_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
+            #     (smile_df['STRIKE'] * np.exp(-risk_free * tte) - smile_df['SPOT']))
+            smile_df['intrinsic'] = np.where(smile_df['TYPE'] == 'CE', 
+                                         (synthetic_fwd - smile_df['STRIKE']), 
+                                         (smile_df['STRIKE'] - synthetic_fwd))
+            
+            smile_df['intrinsic'] = smile_df['intrinsic'].clip(lower=0)
+            smile_df = smile_df[smile_df['CLOSE'] > smile_df['intrinsic']].copy()
+            smile_df = smile_df[smile_df['CLOSE'] > 1.0]
+            smile_df['IV'] = smile_df.apply(
+                lambda row: find_iv(row['CLOSE'], synthetic_fwd, row['STRIKE'], tte, row['TYPE']), axis=1
+            )
+            # Convert to percentage
+            smile_df['IV_pct'] = smile_df['IV'] * 100
+            
+            
+            # --- RUNNING IT ---
+            params = fit_svi(smile_df, synthetic_fwd, tte)
+            strikes_fine, iv_fine, pdf_fine = get_svi_results(params, synthetic_fwd, tte, 
+                                                             [smile_df['STRIKE'].min(), smile_df['STRIKE'].max()])
+            
+            pdf_df = pd.DataFrame({
+                    'STRIKE': strikes_fine,
+                    'IV_SVI': iv_fine,
+                    'PDF': pdf_fine
+                })
+            logger.info(f"Spot: {pdf_df}")
+        # 3. Visualization
+    #    st.subheader(f"📈 {symbol} Close Prices - Expiry: {selected_expiry}")
+    #    
+    #    fig = px.line(final_df, x="STRIKE", y="CLOSE", color="TYPE",
+    #                  labels={"STRIKE": "Strike Price", "CLOSE": "Closing Price"},
+    #                  markers=True, template="plotly_dark")
+    #    fig = px.line(final_df, x="STRIKE", y="IV_pct", color="TYPE",
+    #                  labels={"STRIKE": "Strike Price", "IV_Pct": "Implied Volatility (BS)"},
+    #                  markers=True, template="plotly_dark")
+    #    st.plotly_chart(fig, width=True)
+    # --- 3. SIDE-BY-SIDE VISUALIZATION ---
         
-        # 3. Add the Spot Line and Layout updates
-        current_spot = smile_df['SPOT'].iloc[0]
-        fig_iv.add_vline(x=current_spot, line_dash="dash", line_color="grey", annotation_text="SPOT")
-        fig_iv.update_layout(hovermode="x unified")
-        st.plotly_chart(fig_iv, use_container_width=True)
-        # 4. Data Table
-    with st.expander("View Filtered Data Table"):
-        st.dataframe(smile_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']].sort_values(by=['TYPE','STRIKE']), use_container_width=True)
+    
+
+        st.subheader(f"📊 {symbol} Analysis - Expiry: {selected_expiry}")
+    
+        # Create two equal-width columns
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Plot 1: Close Prices
+            fig_price = px.line(
+                final_df, 
+                x="STRIKE", 
+                y="CLOSE", 
+                color="TYPE",
+                title="Option Closing Prices",
+                labels={"STRIKE": "Strike", "CLOSE": "Price (₹)"},
+                color_discrete_map={'CE': '#00ff00', 'PE': '#ff0000'},
+                markers=True, 
+                template="plotly_dark"
+            )
+            fig_price.update_layout(hovermode="x unified")
+            st.plotly_chart(fig_price, width="stretch")
+        
+        with col2:
+            # Plot 2: Implied Volatility (The Smile)
+            # 1. Create the base figure with Market IV
+            fig_iv = px.line(
+                smile_df, 
+                x="STRIKE", 
+                y="IV_pct", 
+                title="IV Smile: Market vs SVI (using OTM CE and OT PE, Synthetic Forwrard)",
+                markers=True,
+                template="plotly_dark"
+            )
+            fig_iv.update_traces(mode='markers')
+            # 2. Create a temporary figure for the SVI line
+            fig_svi_line = px.line(
+                pdf_df, 
+                x="STRIKE", 
+                y="IV_SVI"
+            )
+            
+            # 3. Change the SVI line color so it stands out
+            fig_svi_line.update_traces(line_color='#00d4ff', name='SVI Fit', showlegend=True)
+            
+            # 4. Add the traces from the SVI figure to the base figure
+            for trace in fig_svi_line.data:
+                fig_iv.add_trace(trace)
+            
+            # 5. Final updates and display
+            fig_iv.update_layout(hovermode="x unified")
+            st.plotly_chart(fig_iv, width="stretch")
+            
+        with col3:
+            fig_pdf = go.Figure()
+    
+    # Shaded Area for Probability
+            fig_pdf.add_trace(go.Scatter(
+                x=strikes_fine, 
+                y=pdf_fine, 
+                fill='tozeroy', 
+                name='Risk-Neutral Density',
+                line=dict(color='#ff7f0e', width=2),
+                fillcolor='rgba(255, 127, 14, 0.2)'
+            ))
+            
+            # Forward Price Reference
+            fig_pdf.add_vline(x=synthetic_fwd, line_dash="dot", line_color="white", 
+                              annotation_text="Expected Price (Forward)")
+            
+            fig_pdf.update_layout(
+                title="Market-Implied Probability Distribution (at Expiry)",
+                xaxis_title="Price at Expiry",
+                yaxis_title="Probability Density",
+                template="plotly_dark",
+                hovermode="x unified",
+                height=400 # Slightly taller for better readability
+            )
+            st.plotly_chart(fig_pdf, width="stretch")
+            # 4. Data Table
+        with st.expander("View Filtered Data Table"):
+            st.dataframe(smile_df[['STRIKE', 'TYPE', 'CLOSE', 'IV_pct', 'OI']].sort_values(by=['TYPE','STRIKE']), width="stretch")
+        with st.expander("View SVI IV and PDF"):
+            st.dataframe(pdf_df[['STRIKE','IV_SVI','PDF']], width='stretch')
+    with tab2:
+        # --- Move your existing col1, col2, and fig_pdf code here ---
+        st.write("Smile Analysis")
+        # ... (Your existing code)
+
 else:
     st.info("Please select a date and click 'Get Data' in the sidebar to begin.")
