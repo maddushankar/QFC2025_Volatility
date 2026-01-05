@@ -37,13 +37,13 @@ def find_iv(market_price, S, K, T, r, option_type):
     def objective_function(sigma):
         return black_scholes(S, K, T, r, sigma, option_type) - market_price
 
-    try:
+    #try:
         # Use brentq - it is much more stable than newton for IV
         # It looks for a solution between 1% and 500% volatility
-        return brentq(objective_function, 0.01, 5.0, xtol=1e-5)
-    except (ValueError, RuntimeError):
+    return brentq(objective_function, 0.01, 5.0, xtol=1e-5)
+    #except (ValueError, RuntimeError):
         # If the price is mathematically impossible (e.g. below intrinsic value)
-        return 0.0
+        #return 0.0
 def get_tte(trade_date_str, expiry_date_str):
     t = datetime.strptime(trade_date_str, '%Y-%m-%d')
     e = datetime.strptime(expiry_date_str, '%Y-%m-%d')
