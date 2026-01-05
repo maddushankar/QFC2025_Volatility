@@ -10,9 +10,14 @@ from datetime import datetime
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Nifty Maturity Hub", layout="wide")
 CACHE_DIR = "data_cache"
+if not os.path.exists(CACHE_DIR) : os.makedirs(CACHE_DIR)
+    
+# --- INITIALIZE SESSION STATE ---
+# This prevents the AttributeError
+if 'active_df' not in st.session_state: st.session_state.active_df = None
+if 'spot' not in st.session_state: st.session_state.spot = 0.0
 
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
+# --- BLACK-SCHOLES ENGINE ---
 def black_scholes(S, K, T, r, sigma, option_type='CE'):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
