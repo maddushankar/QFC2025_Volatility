@@ -146,6 +146,16 @@ if st.session_state.active_df is not None:
     with st.spinner("Calculating Implied Volatility..."):
         
         tte = get_tte(str(trading_date), selected_expiry)
+        strike_range = 0.2
+        min_volume = 10000
+        upper_bound = final_df['SPOT'].values[0] * (1 + strike_range)
+        lower_bound = final_df['SPOT'].values[0] * (1 - strike_range)
+        
+        final_df = final_df[
+            (final_df['STRIKE'] >= lower_bound) & 
+            (final_df['STRIKE'] <= upper_bound)
+        ].copy()
+        final_df = final_df[final_df['OI'] > min_volume]
         final_df['intrinsic'] = np.where(
             final_df['TYPE'] == 'CE',
             (final_df['SPOT'] - final_df['STRIKE'] * np.exp(-risk_free * tte)), # Discounted Strike
