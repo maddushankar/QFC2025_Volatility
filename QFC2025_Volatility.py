@@ -13,6 +13,9 @@ from scipy.optimize import minimize
 import plotly.express as px          # For quick scaffolding
 import plotly.graph_objects as go    # For complex layering (PDF, SVI)
 
+import yfinance as yf
+
+from datetime import timedelta
 import logging
 
 # Configure logging
@@ -72,6 +75,7 @@ def svi_formula(params, k):
     """Raw SVI Parameterization"""
     a, b, rho, m, sigma = params
     return a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
+
 
 def svi_objective(params, k, w_market):
     """Objective function: Mean Squared Error"""
@@ -200,6 +204,37 @@ def get_nifty_data(target_date):
     except Exception as e:
         return f"Request failed: {str(e)}"
 
+
+def get_realized_vol(ticker_symbol, target_date):
+    # 1. Fetch historical data (Lookback ~45 days to get 30 trading days)
+    start_dt = pd.to_datetime(target_date) - timedelta(days=45)
+    data = yf.download(ticker_symbol, start=start_dt, end=target_date)
+    
+    if data.empty:
+        return None, None
+    
+    # Use 'Adj Close' for accuracy (dividends/splits), fallback to 'Close'
+    prices = data['Adj Close'] if 'Adj Close' in data.columns else data['Close']
+    
+    # 2. Calculate Log Returns
+    # Formula: ln(Price_t / Price_{t-1})
+    log_returns = np.log(prices / prices.shift(1)).dropna()
+    
+    # Take the last 30 trading days
+    recent_returns = log_returns.tail(30)
+    
+    # 3. Calculate Daily Std Dev and Annualize
+    # Annualization Factor = sqrt(252 trading days)
+    daily_vol = recent_returns.std()
+    annualized_rv = daily_vol * np.sqrt(252) * 100  # Convert to %
+    
+    current_price = prices.iloc[-1]
+    
+    return float(annualized_rv), current_price
+
+# Example Usage:
+# rv, price = get_realized_vol("^NSEI", "2026-01-05")
+# print(f"Nifty RV: {rv:.2f}%, Close: {price:.2f}")
 # --- SIDEBAR & SESSION STATE ---
 if 'active_df' not in st.session_state:
     st.session_state.active_df = None
@@ -208,7 +243,9 @@ with st.sidebar:
     st.header("📅 Data Controls")
     trading_date = st.date_input("Trading Day", value=datetime(2025, 12, 31))
     symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY"])
-    
+    yf_tickers={'NIFTY':'^NSEI',
+                'BANKNIFTY':'^NSEBANK'}
+    yf_symbol = yf_tickers[symbol]
     # TRIGGER BUTTON
     if st.button("🚀 Get Data", width="stretch"):
         with st.spinner("Fetching from NSE Archives..."):
@@ -398,8 +435,10 @@ if st.session_state.active_df is not None:
     #    st.plotly_chart(fig, width=True)
     # --- 3. SIDE-BY-SIDE VISUALIZATION ---
         
-    
-
+            rv, _ = get_realized_vol(yf_symbol,trading_date)
+            
+            # final_df['rv'] = rv
+            logger.info(f"realized volatility: {rv}")
         st.subheader(f"📊 {symbol} Analysis - Expiry: {selected_expiry}")
     
         # Create two equal-width columns
@@ -439,13 +478,21 @@ if st.session_state.active_df is not None:
                 x="STRIKE", 
                 y="IV_SVI"
             )
-            
             # 3. Change the SVI line color so it stands out
             fig_svi_line.update_traces(line_color='#00d4ff', name='SVI Fit', showlegend=True)
             
+            
             # 4. Add the traces from the SVI figure to the base figure
-            for trace in fig_svi_line.data:
+            for trace in fig_svi_line.data: #, fig_rv_line.data
                 fig_iv.add_trace(trace)
+            
+            fig_iv.add_hline(
+            y=rv, 
+            line_dash="dash", 
+            line_color="#ff4b4b", 
+            annotation_text=f"30D Realized Vol ({rv:.2f}%)", 
+            annotation_position="bottom right"
+        )
             
             # 5. Final updates and display
             fig_iv.update_layout(hovermode="x unified")
